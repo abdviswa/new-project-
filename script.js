@@ -203,14 +203,63 @@ function addPhotoToGrid(imgDataUrl) {
     gsap.fromTo(itemDiv, {opacity: 0, y: 20}, {opacity: 1, y: 0, duration: 0.5, ease: "power2.out"});
 }
 
-// Image compression to prevent localStorage QuotaExceededError
+// ── IndexedDB Memory Storage ──────────────────────────────────────────────────
+const DB_NAME = 'birthdayMemories';
+const DB_STORE = 'photos';
+let db = null;
+
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+            const database = e.target.result;
+            if (!database.objectStoreNames.contains(DB_STORE)) {
+                database.createObjectStore(DB_STORE, { keyPath: 'id', autoIncrement: true });
+            }
+        };
+        req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+        req.onerror = (e) => reject(e);
+    });
+}
+
+function savePhotoDB(dataUrl) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        const req = store.add({ data: dataUrl });
+        req.onsuccess = () => resolve(req.result); // returns generated id
+        req.onerror = (e) => reject(e);
+    });
+}
+
+function getAllPhotosDB() {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readonly');
+        const store = tx.objectStore(DB_STORE);
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = (e) => reject(e);
+    });
+}
+
+function clearAllPhotosDB() {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        const req = store.clear();
+        req.onsuccess = () => resolve();
+        req.onerror = (e) => reject(e);
+    });
+}
+
+// Image compression
 function compressImage(dataUrl, callback) {
     const img = new Image();
     img.onload = () => {
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
-        const maxRes = 800; // max width/height
+        const maxRes = 800;
 
         if (width > height) {
             if (width > maxRes) { height *= maxRes / width; width = maxRes; }
@@ -222,31 +271,29 @@ function compressImage(dataUrl, callback) {
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
-
-        callback(canvas.toDataURL('image/jpeg', 0.7)); // compress to 70% quality jpeg
+        callback(canvas.toDataURL('image/jpeg', 0.7));
     };
     img.src = dataUrl;
 }
 
-// Load saved photos on startup
-let savedMemories = [];
-try {
-    const raw = localStorage.getItem('siteMemories');
-    if (raw) savedMemories = JSON.parse(raw);
-    savedMemories.forEach(dataUrl => addPhotoToGrid(dataUrl));
-} catch (e) { console.warn("Failed to load memories", e); }
+// Load saved photos on startup using IndexedDB
+openDB().then(() => {
+    return getAllPhotosDB();
+}).then((photos) => {
+    photos.forEach(photo => addPhotoToGrid(photo.data));
+}).catch(e => console.warn("Failed to load memories from IndexedDB", e));
 
 // Clear Memories
 if (clearMemoriesBtn) {
     clearMemoriesBtn.addEventListener('click', () => {
         if (confirm("Are you sure you want to remove all saved photos?")) {
-            localStorage.removeItem('siteMemories');
-            savedMemories = [];
-            if (galleryGrid) galleryGrid.innerHTML = '';
-            if (noPhotosMsg) {
-                noPhotosMsg.style.display = 'block';
-                if (galleryGrid) galleryGrid.appendChild(noPhotosMsg);
-            }
+            clearAllPhotosDB().then(() => {
+                if (galleryGrid) galleryGrid.innerHTML = '';
+                if (noPhotosMsg) {
+                    noPhotosMsg.style.display = 'block';
+                    if (galleryGrid) galleryGrid.appendChild(noPhotosMsg);
+                }
+            }).catch(e => console.warn("Failed to clear memories", e));
         }
     });
 }
@@ -255,22 +302,18 @@ if (clearMemoriesBtn) {
 if (memoryUpload) {
     memoryUpload.addEventListener('change', (e) => {
         const files = Array.from(e.target.files);
-        
+
         files.forEach(file => {
             const reader = new FileReader();
             reader.onload = (event) => {
                 const imgDataUrl = event.target.result;
-                
-                // Compress and save
+
                 compressImage(imgDataUrl, (compressed) => {
                     addPhotoToGrid(compressed); // Show instantly
-                    savedMemories.push(compressed);
-                    try {
-                        localStorage.setItem('siteMemories', JSON.stringify(savedMemories));
-                    } catch (err) {
-                        console.warn("Storage quota exceeded", err);
-                        alert("Storage limit reached! This photo might disappear on refresh.");
-                    }
+                    savePhotoDB(compressed).catch(err => {
+                        console.warn("Failed to save photo to IndexedDB", err);
+                        alert("Could not save photo permanently. It will disappear on refresh.");
+                    });
                 });
             };
             reader.readAsDataURL(file);
